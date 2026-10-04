@@ -1,17 +1,4 @@
-                    user input
-                        │
-            ┌───────────┴───────────┐
-            │                       │
-       local folder            GitHub URL
-            │                       │
-            │                    git clone
-            │                       │
-            └───────────┬───────────┘
-                        ▼
-                local repository path
-                        │
-                        ▼
-             loadRepositoryDocuments()
+node ./src/index.js
 
                       ┌─────────────────────┐
                       │     Repo URL        │
