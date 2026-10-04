@@ -1,95 +1,101 @@
-import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
+import "dotenv/config";
+
+import { createInterface } from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+
+import {
+  ChatOpenAI,
+  OpenAIEmbeddings,
+} from "@langchain/openai";
+
+import { MemoryVectorStore } from "@langchain/classic/vectorstores/memory";
+
+import {
+  loadRepositoryDocuments,
+} from "./repository.js";
+
+import {
+  resolveRepository,
+} from "./repository-source.js";
+
+
+const rl = createInterface({
+  input,
+  output,
+});
+
 
 const llm = new ChatOpenAI({
   model: process.env.CHAT_MODEL,
   apiKey: process.env.LM_STUDIO_API_KEY,
   temperature: 0,
+
   configuration: {
     baseURL: process.env.LM_STUDIO_BASE_URL,
   },
 });
+
 
 const embeddings = new OpenAIEmbeddings({
   model: process.env.EMBEDDING_MODEL,
   apiKey: process.env.LM_STUDIO_API_KEY,
+
   configuration: {
     baseURL: process.env.LM_STUDIO_BASE_URL,
   },
 });
 
-// User supplies a MD URL like https://raw.githubusercontent.com/some/project/main/README.md
-async function fetchMarkdown(url) {
-  const response = await fetch(url);
 
-  if (!response.ok) {
-    throw new Error(
-      `Failed to fetch Markdown: ${response.status} ${response.statusText}`
-    );
-  }
-
-  return await response.text();
-}
-
-import { MarkdownTextSplitter } from "@langchain/textsplitters";
-
-async function splitMarkdown(markdown, source) {
-  const splitter = new MarkdownTextSplitter({
-    chunkSize: 1000,
-    chunkOverlap: 150,
-  });
-
-  return await splitter.createDocuments(
-    [markdown],
-    [{ source }]
-  );
-}
-
-// Chunks into embeddings and stores them in a vector store for retrieval, triggers calls like: POST http://localhost:1234/v1/embeddings to LM Studio.
-import { MemoryVectorStore } from "@langchain/classic/vectorstores/memory";
-
-async function buildVectorStore(documents, embeddings) {
-  return await MemoryVectorStore.fromDocuments(
-    documents,
-    embeddings
-  );
-}
-
-const rl = createInterface({ input, output });
-
-
-async function answerQuestion(question, retriever, llm) {
-  const docs = await retriever.invoke(question);
-  //console.log("retriever:", retriever);
+async function answerQuestion(
+  question,
+  retriever,
+  llm
+) {
+  const docs =
+    await retriever.invoke(question);
 
   const context = docs
-    .map(
-      (doc, index) =>
-        `[Source ${index + 1}]\n${doc.pageContent}`
-    )
+    .map((doc) => {
+      const source =
+        doc.metadata.source;
+
+      const chunk =
+        doc.metadata.chunk;
+
+      return `
+SOURCE: ${source}
+CHUNK: ${chunk}
+
+${doc.pageContent}
+`;
+    })
     .join("\n\n---\n\n");
+
 
   const response = await llm.invoke([
     [
       "system",
-      `You are a documentation assistant.
+      `You are a documentation assistant for a software repository.
 
-        Answer questions only using the supplied documentation context.
+Answer questions only using the supplied repository documentation.
 
-        If the answer cannot be determined from the context, say that the documentation does not provide enough information.
+If the answer cannot be determined from the context, say that the documentation does not provide enough information.
 
-        Cite the relevant retrieved sections using [Source 1], [Source 2], etc.
+Cite the source file using its exact path in square brackets, for example [docs/installation.md].
 
-        Do not invent commands, APIs, configuration options, or behavior.`,
+Do not invent commands, APIs, configuration options, filenames, paths, or behavior.`,
     ],
-    [
-        "human",
-        `QUESTION:
-        ${question}
 
-        DOCUMENTATION CONTEXT:
-        ${context}`,
+    [
+      "human",
+      `QUESTION:
+${question}
+
+REPOSITORY DOCUMENTATION:
+${context}`,
     ],
   ]);
+
 
   return {
     answer: response.content,
@@ -97,79 +103,184 @@ async function answerQuestion(question, retriever, llm) {
   };
 }
 
-import "dotenv/config";
-
-import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
-
 
 async function main() {
-  console.log("\nLocal Markdown RAG Assistant");
-  console.log("============================\n");
-
-  const url = await rl.question(
-    "Enter the RAW URL of a Markdown document:\n> "
+  console.log(
+    "\nLocal Repository RAG Assistant"
   );
 
-  console.log("\nDownloading document...");
-  const markdown = await fetchMarkdown(url);
+  console.log(
+    "==============================\n"
+  );
 
-  console.log("Splitting document...");
-  const documents = await splitMarkdown(markdown, url);
 
-  console.log(`Created ${documents.length} chunks.`);
-
-  console.log("Generating embeddings...");
-  const vectorStore =
-    await MemoryVectorStore.fromDocuments(
-      documents,
-      embeddings
+  // 1. Get repository
+  const repositoryInput =
+    await rl.question(
+      "Enter a local repository path or GitHub URL:\n> "
     );
 
-  const retriever = vectorStore.asRetriever(4);
 
-  console.log("\nDocument indexed.");
-  console.log("Ask questions below. Type 'exit' to quit.\n");
+  const repository =
+    await resolveRepository(repositoryInput);
 
-  while (true) {
-    const question = await rl.question("You > ");
 
-    if (
-      question.trim().toLowerCase() === "exit"
-    ) {
-      break;
+  try {
+
+    // 2. Scan Markdown files
+    console.log(
+      "\nScanning repository..."
+    );
+
+
+    const {
+      documents,
+      files,
+    } =
+      await loadRepositoryDocuments(
+        repository.path
+      );
+
+
+    console.log(
+      `Found ${files.length} Markdown files.`
+    );
+
+    console.log(
+      `Created ${documents.length} chunks.`
+    );
+
+
+    // Useful debugging checkpoint
+    console.log(
+      "\nExample chunk metadata:"
+    );
+
+    console.log(
+      documents
+        .slice(0, 5)
+        .map((doc) => doc.metadata)
+    );
+
+
+    if (documents.length === 0) {
+      throw new Error(
+        "No Markdown documents were found in the repository."
+      );
     }
 
-    if (!question.trim()) {
-      continue;
-    }
 
-    try {
-      const { answer, sources } =
-        await answerQuestion(question, retriever, llm);
+    // 3. Generate embeddings
+    console.log(
+      "\nGenerating embeddings..."
+    );
 
-      console.log(`\nAssistant > ${answer}\n`);
 
-      console.log("Retrieved chunks:");
+    const vectorStore =
+      await MemoryVectorStore.fromDocuments(
+        documents,
+        embeddings
+      );
 
-      sources.forEach((doc, index) => {
-        const preview =
-          doc.pageContent
-            .replace(/\s+/g, " ")
-            .slice(0, 160);
+
+    // 4. Create retriever
+    const retriever =
+      vectorStore.asRetriever(4);
+
+
+    console.log(
+      "\nRepository indexed."
+    );
+
+    console.log(
+      "Ask questions below. Type 'exit' to quit.\n"
+    );
+
+
+    // 5. Question-answer loop
+    while (true) {
+
+      const question =
+        await rl.question("You > ");
+
+
+      if (
+        question
+          .trim()
+          .toLowerCase() === "exit"
+      ) {
+        break;
+      }
+
+
+      if (!question.trim()) {
+        continue;
+      }
+
+
+      try {
+
+        const {
+          answer,
+          sources,
+        } =
+          await answerQuestion(
+            question,
+            retriever,
+            llm
+          );
+
 
         console.log(
-          `  [Source ${index + 1}] ${preview}...`
+          `\nAssistant > ${answer}\n`
         );
-      });
 
-      console.log();
-    } catch (error) {
-      console.error("\nError:", error.message, "\n");
+
+        console.log(
+          "Retrieved context:"
+        );
+
+
+        sources.forEach((doc) => {
+
+          const source =
+            doc.metadata.source;
+
+          const chunk =
+            doc.metadata.chunk;
+
+          const totalChunks =
+            doc.metadata.totalChunks;
+
+
+          console.log(
+            `- ${source} ` +
+            `(chunk ${chunk}/${totalChunks})`
+          );
+        });
+
+
+        console.log();
+
+      } catch (error) {
+
+        console.error(
+          "\nQuery error:",
+          error.message,
+          "\n"
+        );
+
+      }
     }
-  }
 
-  rl.close();
+  } finally {
+
+    // Deletes temporary clone if input was GitHub URL.
+    // Does nothing for a local repository.
+    await repository.cleanup();
+
+    rl.close();
+  }
 }
 
 
